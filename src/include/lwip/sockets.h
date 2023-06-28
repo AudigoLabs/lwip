@@ -285,11 +285,12 @@ struct linger {
 /*
  * Options for level IPPROTO_TCP
  */
-#define TCP_NODELAY    0x01    /* don't delay send to coalesce packets */
-#define TCP_KEEPALIVE  0x02    /* send KEEPALIVE probes when idle for pcb->keep_idle milliseconds */
-#define TCP_KEEPIDLE   0x03    /* set pcb->keep_idle  - Same as TCP_KEEPALIVE, but use seconds for get/setsockopt */
-#define TCP_KEEPINTVL  0x04    /* set pcb->keep_intvl - Use seconds for get/setsockopt */
-#define TCP_KEEPCNT    0x05    /* set pcb->keep_cnt   - Use number of probes sent for get/setsockopt */
+#define TCP_NODELAY       0x01    /* don't delay send to coalesce packets */
+#define TCP_KEEPALIVE     0x02    /* send KEEPALIVE probes when idle for pcb->keep_idle milliseconds */
+#define TCP_KEEPIDLE      0x03    /* set pcb->keep_idle  - Same as TCP_KEEPALIVE, but use seconds for get/setsockopt */
+#define TCP_KEEPINTVL     0x04    /* set pcb->keep_intvl - Use seconds for get/setsockopt */
+#define TCP_KEEPCNT       0x05    /* set pcb->keep_cnt   - Use number of probes sent for get/setsockopt */
+#define TCP_USER_TIMEOUT  0x12    /* set pcb->user_timeout - How long for loss retry before timeout */
 #endif /* LWIP_TCP */
 
 #if LWIP_IPV6
@@ -422,6 +423,9 @@ typedef struct ipv6_mreq {
 
 #define _IOW(x,y,t)     ((long)(IOC_IN|((sizeof(t)&IOCPARM_MASK)<<16)|((x)<<8)|(y)))
 #endif /* !defined(FIONREAD) || !defined(FIONBIO) */
+
+/* Get (not sent + not acked) data bytes in send buffer. */
+#define SIOCOUTQ    _IOR('s', 115, unsigned long)
 
 #ifndef FIONREAD
 #define FIONREAD    _IOR('f', 127, unsigned long) /* get # bytes to read */
@@ -612,6 +616,8 @@ ssize_t lwip_send(int s, const void *dataptr, size_t size, int flags);
 ssize_t lwip_sendmsg(int s, const struct msghdr *message, int flags);
 ssize_t lwip_sendto(int s, const void *dataptr, size_t size, int flags,
     const struct sockaddr *to, socklen_t tolen);
+ssize_t lwip_sendto_with_header(int s, const void *data, size_t size, const void *hdr_data,
+    size_t hdr_size, int flags, const struct sockaddr *to, socklen_t tolen);
 int lwip_socket(int domain, int type, int protocol);
 ssize_t lwip_write(int s, const void *dataptr, size_t size);
 ssize_t lwip_writev(int s, const struct iovec *iov, int iovcnt);

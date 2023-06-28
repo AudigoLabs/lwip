@@ -1719,6 +1719,95 @@ lwip_sendto(int s, const void *data, size_t size, int flags,
   return (err == ERR_OK ? short_size : -1);
 }
 
+ssize_t
+lwip_sendto_with_header(int s, const void *data, size_t size, const void *hdr_data, size_t hdr_size, int flags,
+            const struct sockaddr *to, socklen_t tolen)
+{
+  struct lwip_sock *sock;
+  err_t err;
+  u16_t remote_port;
+  struct netbuf buf;
+
+  sock = get_socket(s);
+  if (!sock) {
+    return -1;
+  }
+
+  if (NETCONNTYPE_GROUP(netconn_type(sock->conn)) == NETCONN_TCP) {
+    LWIP_UNUSED_ARG(flags);
+    set_errno(err_to_errno(ERR_ARG));
+    done_socket(sock);
+    return -1;
+  }
+
+  if ((size + hdr_size) > LWIP_MIN(0xFFFF, SSIZE_MAX)) {
+    /* cannot fit into one datagram (at least for us) */
+    set_errno(EMSGSIZE);
+    done_socket(sock);
+    return -1;
+  }
+  LWIP_ERROR("lwip_sendto: invalid address", (((to == NULL) && (tolen == 0)) ||
+             (IS_SOCK_ADDR_LEN_VALID(tolen) &&
+              ((to != NULL) && (IS_SOCK_ADDR_TYPE_VALID(to) && IS_SOCK_ADDR_ALIGNED(to))))),
+             set_errno(err_to_errno(ERR_ARG)); done_socket(sock); return -1;);
+  LWIP_UNUSED_ARG(tolen);
+
+  /* initialize a buffer */
+  buf.p = buf.ptr = NULL;
+#if LWIP_CHECKSUM_ON_COPY
+  buf.flags = 0;
+#endif /* LWIP_CHECKSUM_ON_COPY */
+  if (to) {
+    SOCKADDR_TO_IPADDR_PORT(to, &buf.addr, remote_port);
+  } else {
+    remote_port = 0;
+    ip_addr_set_any(NETCONNTYPE_ISIPV6(netconn_type(sock->conn)), &buf.addr);
+  }
+  netbuf_fromport(&buf) = remote_port;
+
+
+  LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_sendto(%d, data=%p, short_size=%"U16_F", flags=0x%x to=",
+                              s, data, (u16_t)(hdr_size + size), flags));
+  ip_addr_debug_print_val(SOCKETS_DEBUG, buf.addr);
+  LWIP_DEBUGF(SOCKETS_DEBUG, (" port=%"U16_F"\n", remote_port));
+
+  /* make the buffer point to the data that should be sent */
+#if LWIP_NETIF_TX_SINGLE_PBUF
+  err = ERR_ARG;
+#else /* LWIP_NETIF_TX_SINGLE_PBUF */
+  err = netbuf_ref(&buf, hdr_data, hdr_size);
+  if (err == ERR_OK) {
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, 0, PBUF_REF);
+    if (p != NULL) {
+      ((struct pbuf_rom *)p)->payload = data;
+      p->len = p->tot_len = size;
+      pbuf_cat(buf.p, p);
+    } else {
+      err = ERR_MEM;
+    }
+  }
+#endif /* LWIP_NETIF_TX_SINGLE_PBUF */
+  if (err == ERR_OK) {
+#if LWIP_IPV4 && LWIP_IPV6
+    /* Dual-stack: Unmap IPv4 mapped IPv6 addresses */
+    if (IP_IS_V6_VAL(buf.addr) && ip6_addr_isipv4mappedipv6(ip_2_ip6(&buf.addr))) {
+      unmap_ipv4_mapped_ipv6(ip_2_ip4(&buf.addr), ip_2_ip6(&buf.addr));
+      IP_SET_TYPE_VAL(buf.addr, IPADDR_TYPE_V4);
+    }
+#endif /* LWIP_IPV4 && LWIP_IPV6 */
+
+    /* send the data */
+    err = netconn_send(sock->conn, &buf);
+  }
+
+  /* deallocated the buffer */
+  netbuf_free(&buf);
+
+  set_errno(err_to_errno(err));
+  done_socket(sock);
+  return (err == ERR_OK ? (size + hdr_size) : -1);
+}
+
 int
 lwip_socket(int domain, int type, int protocol)
 {
@@ -3131,6 +3220,14 @@ lwip_getsockopt_impl(int s, int level, int optname, void *optval, socklen_t *opt
           LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_getsockopt(%d, IPPROTO_TCP, TCP_KEEPALIVE) = %d\n",
                                       s, *(int *)optval));
           break;
+#if LWIP_TCP_USER_TIMEOUT
+        case TCP_USER_TIMEOUT:
+          /* User timeout is saved as multiple of the 500ms */
+          *(int *)optval = (int)sock->conn->pcb.tcp->user_timeout * 500;
+          LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_getsockopt(%d, IPPROTO_TCP, TCP_USER_TIMEOUT) = %d\n",
+                                      s, *(int *)optval));
+          break;
+#endif
 
 #if LWIP_TCP_KEEPALIVE
         case TCP_KEEPIDLE:
@@ -3608,7 +3705,20 @@ lwip_setsockopt_impl(int s, int level, int optname, const void *optval, socklen_
           LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_setsockopt(%d, IPPROTO_TCP, TCP_KEEPALIVE) -> %"U32_F"\n",
                                       s, sock->conn->pcb.tcp->keep_idle));
           break;
+#if LWIP_TCP_USER_TIMEOUT
+        case TCP_USER_TIMEOUT: {
+          /* User timeout is saved as multiple of the 500ms */
+          uint32_t timeout_ms = (u32_t)(*(const int *)optval);
+          if(timeout_ms < 500)
+              sock->conn->pcb.tcp->user_timeout = 1;
+          else
+              sock->conn->pcb.tcp->user_timeout = timeout_ms/500;
 
+          LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_setsockopt(%d, IPPROTO_TCP, TCP_USER_TIMEOUT) -> %"U32_F"\n",
+                                      s, sock->conn->pcb.tcp->user_timeout));
+          }
+          break;
+#endif
 #if LWIP_TCP_KEEPALIVE
         case TCP_KEEPIDLE:
           sock->conn->pcb.tcp->keep_idle = 1000 * (u32_t)(*(const int *)optval);
@@ -3855,6 +3965,21 @@ lwip_ioctl(int s, long cmd, void *argp)
       set_errno(0);
       done_socket(sock);
       return 0;
+
+#if LWIP_SIOCOUTQ
+  /* Get count of (not sent + not acked) data */
+  case SIOCOUTQ:
+      if (!argp)
+        return -1;
+      if(sock->conn == NULL)
+          return -1;
+      if(sock->conn->pcb.tcp == NULL)
+          return -1;
+
+      *((int *)argp) =  tcp_seg_get_unacked_count(sock->conn->pcb.tcp);
+
+      return 0;
+#endif /* LWIP_SIOCOUTQ */
 
     default:
       break;
